@@ -3,7 +3,7 @@
 # TDA596 - Lab 1
 # server/server.py
 # Input: Node_ID total_number_of_ID
-# Student: John Doe
+# Student: Anton Solback
 # ------------------------------------------------------------------------------------------------------
 import traceback
 import sys
@@ -14,6 +14,11 @@ from threading import Thread
 
 from bottle import Bottle, run, request, template
 import requests
+
+BOARD_ADD = 'Add'
+BOARD_DELETE = 'Delete'
+BOARD_MODIFY = 'Modify'
+
 # ------------------------------------------------------------------------------------------------------
 try:
     app = Bottle()
@@ -29,7 +34,7 @@ try:
         global board, node_id
         success = False
         try:
-            board[str(entry_sequence)] = element
+            board[entry_sequence] = element
             success = True
         except Exception as e:
             print e
@@ -39,7 +44,7 @@ try:
         global board, node_id
         success = False
         try:
-            board = modified_element
+            board[entry_sequence] = modified_element
             success = True
         except Exception as e:
             print e
@@ -49,7 +54,7 @@ try:
         global board, node_id
         success = False
         try:
-            board = ""
+            del board[entry_sequence]
             success = True
         except Exception as e:
             print e
@@ -105,17 +110,21 @@ try:
     # ------------------------------------------------------------------------------------------------------
     @app.post('/board')
     def client_add_received():
-        '''Adds a new element to the board
-        Called directly when a user is doing a POST request on /board'''
+        '''
+        Adds a new element to the board
+        Called directly when a user is doing a POST request on /board
+        '''
         global board, node_id, entry_number
         try:
             new_entry = request.forms.get('entry')
             entry_number = entry_number + 1
-            add_new_element_to_store(entry_number, new_entry) # you might want to change None here
-            # you should propagate something
-            # Please use threads to avoid blocking
-            #thread = Thread(target=???,args=???)
-            # you should create the thread as a deamon
+            add_new_element_to_store(entry_number, new_entry)
+
+            # send requests to vessels to update
+            thread = Thread(target=propagate_to_vessels("/propagate/{}/{}".format(BOARD_ADD, entry_number), new_entry))
+            thread.daemon = True
+            thread.start()
+
             return True
         except Exception as e:
             print e
@@ -123,13 +132,23 @@ try:
 
     @app.post('/board/<element_id:int>/')
     def client_action_received(element_id):
-        # todo
-        pass
+        action_to_perform = request.forms.get('action')
+
+        if action_to_perform == "0":
+            print "Modify: ", request.forms.get("entry")
+            modify_element_in_store(element_id, request.forms.get("entry"))
+        elif action_to_perform == "1":
+            print "Delete"
+            delete_element_from_store(element_id)
 
     @app.post('/propagate/<action>/<element_id>')
     def propagation_received(action, element_id):
-        # todo
-        pass
+        global entry_number
+
+        if action == BOARD_ADD:
+            entry_number = entry_number + 1
+
+            add_new_element_to_store(element_id, request.body.getvalue())
         
     # ------------------------------------------------------------------------------------------------------
     # EXECUTION
@@ -151,6 +170,8 @@ try:
         # Only start 2 servers when debugging
         vessel_list["1"] = '10.1.0.1'
         vessel_list["2"] = '10.1.0.2'
+        vessel_list["3"] = '10.1.0.3'
+        vessel_list["4"] = '10.1.0.4'
 
         #for i in range(1, args.nbv):
         #    vessel_list[str(i)] = '10.1.0.{}'.format(str(i))

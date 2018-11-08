@@ -9,8 +9,8 @@ It will be reloaded automatically from the server -->
 		<form class="entryform" target="noreload-form-target" method="post" action="/board/{{board_entry}}/">
 			<input type="text" name="id" value="{{board_entry}}" readonly disabled> <!-- disabled field won’t be sent -->
 			<input type="text" name="entry" value="{{board_element}}" size="70%%">
-			<button type="submit" name="delete" value="0">Modify</button>
-			<button type="submit" name="delete" value="1">X</button>
+			<button type="submit" name="action" value="0">Modify</button>
+			<button type="submit" name="action" value="1">X</button>
 		</form>
     %end
 </div>

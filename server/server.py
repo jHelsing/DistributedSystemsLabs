@@ -147,8 +147,13 @@ try:
         node_id = args.nid
         vessel_list = dict()
         # We need to write the other vessels IP, based on the knowledge of their number
-        for i in range(1, args.nbv):
-            vessel_list[str(i)] = '10.1.0.{}'.format(str(i))
+
+        # Only start 2 servers when debugging
+        vessel_list["1"] = '10.1.0.1'
+        vessel_list["2"] = '10.1.0.2'
+
+        #for i in range(1, args.nbv):
+        #    vessel_list[str(i)] = '10.1.0.{}'.format(str(i))
 
         try:
             run(app, host=vessel_list[str(node_id)], port=port)

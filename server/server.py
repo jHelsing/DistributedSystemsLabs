@@ -18,8 +18,8 @@ import requests
 try:
     app = Bottle()
 
-    board = "nothing" 
-
+    board = {}
+    entry_number = 0
 
     # ------------------------------------------------------------------------------------------------------
     # BOARD FUNCTIONS
@@ -29,7 +29,7 @@ try:
         global board, node_id
         success = False
         try:
-            board = element
+            board[str(entry_sequence)] = element
             success = True
         except Exception as e:
             print e
@@ -95,22 +95,23 @@ try:
     @app.route('/')
     def index():
         global board, node_id
-        return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted({"0":board,}.iteritems()), members_name_string='Anton Solback')
+        return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.iteritems()), members_name_string='Anton Solback')
 
     @app.get('/board')
     def get_board():
         global board, node_id
         print board
-        return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted({"0":board,}.iteritems()))
+        return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted(board.iteritems()))
     # ------------------------------------------------------------------------------------------------------
     @app.post('/board')
     def client_add_received():
         '''Adds a new element to the board
         Called directly when a user is doing a POST request on /board'''
-        global board, node_id
+        global board, node_id, entry_number
         try:
             new_entry = request.forms.get('entry')
-            add_new_element_to_store(None, new_entry) # you might want to change None here
+            entry_number = entry_number + 1
+            add_new_element_to_store(entry_number, new_entry) # you might want to change None here
             # you should propagate something
             # Please use threads to avoid blocking
             #thread = Thread(target=???,args=???)

@@ -10,6 +10,7 @@
 from mininet.topo import Topo # Network topology
 from mininet.net import Mininet # Mininet environment, simulator
 from mininet.link import TCLink, TCIntf, Intf # Customisable links & interfaces
+from mininet.node import OVSController
 from mininet.log import setLogLevel, info # Logger
 from mininet.term import makeTerm, cleanUpScreens # Open xterm from mininet
 from mininet.cli import CLI # Command Line Interface
@@ -99,7 +100,7 @@ class Lab():
         topology = Lab1Topology(nbOfServersPerRegion, nbOfClientsPerRegion, nbOfRegions)
         # We create the simulation
         # Set the topology, the class for links and interfaces, the mininet environment must be cleaned up before launching, we should build now the topology
-        simulation = Mininet(topo = topology, link = TCLink, intf = TCIntf, cleanup = True, build = True, ipBase='10.1.0.0/24')
+        simulation = Mininet(topo = topology, link = TCLink, intf = TCIntf, cleanup = True, build = True, ipBase='10.1.0.0/24', controller=OVSController)
         # We connect the network to Internet
         simulation.addNAT().configDefault()
         # We can start the simulation

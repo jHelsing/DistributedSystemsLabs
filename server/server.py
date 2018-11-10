@@ -10,14 +10,19 @@ import sys
 import time
 import json
 import argparse
+import operator
 from threading import Thread
 
-from bottle import Bottle, run, request, template
+from bottle import Bottle, run, request, template, response
 import requests
 
 BOARD_ADD = 'Add'
 BOARD_DELETE = 'Delete'
 BOARD_MODIFY = 'Modify'
+
+STATUS_OK = 200
+BAD_REQUEST = 400
+INTERNAL_SERVER_ERROR = 500
 
 # ------------------------------------------------------------------------------------------------------
 try:
@@ -100,13 +105,12 @@ try:
     @app.route('/')
     def index():
         global board, node_id
-        return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.iteritems()), members_name_string='Anton Solback')
+        return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)), members_name_string='Anton Solback')
 
     @app.get('/board')
     def get_board():
         global board, node_id
-        print board
-        return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted(board.iteritems()))
+        return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)))
     # ------------------------------------------------------------------------------------------------------
     @app.post('/board')
     def client_add_received():
@@ -116,40 +120,70 @@ try:
         '''
         global board, node_id, entry_number
         try:
-            new_entry = request.forms.get('entry')
-            entry_number = entry_number + 1
-            add_new_element_to_store(entry_number, new_entry)
+            entry = request.forms.get('entry')
+            response.status = BAD_REQUEST
 
-            # send requests to vessels to update
-            thread = Thread(target=propagate_to_vessels("/propagate/{}/{}".format(BOARD_ADD, entry_number), new_entry))
-            thread.daemon = True
-            thread.start()
+            if add_new_element_to_store(entry_number, entry):
+                response.status = STATUS_OK
+                _begin_propagation(BOARD_ADD, entry_number, entry)
+                entry_number += 1
 
-            return True
         except Exception as e:
             print e
-        return False
+            response.status = INTERNAL_SERVER_ERROR
 
     @app.post('/board/<element_id:int>/')
     def client_action_received(element_id):
-        action_to_perform = request.forms.get('action')
 
-        if action_to_perform == "0":
-            print "Modify: ", request.forms.get("entry")
-            modify_element_in_store(element_id, request.forms.get("entry"))
-        elif action_to_perform == "1":
-            print "Delete"
-            delete_element_from_store(element_id)
+        try:
+            action_to_perform = request.forms.get('action')
+            entry = request.forms.get("entry")
+            response.status = BAD_REQUEST
 
-    @app.post('/propagate/<action>/<element_id>')
+            if action_to_perform == "0":
+                if modify_element_in_store(element_id, entry):
+                    response.status = STATUS_OK
+                    _begin_propagation(BOARD_MODIFY, element_id, entry)
+
+            else:
+                if delete_element_from_store(element_id):
+                    response.status = STATUS_OK
+                    _begin_propagation(BOARD_DELETE, element_id)
+
+        except Exception as e:
+            print e
+            response.status = INTERNAL_SERVER_ERROR
+
+    @app.post('/propagate/<action>/<element_id:int>')
     def propagation_received(action, element_id):
         global entry_number
 
-        if action == BOARD_ADD:
-            entry_number = entry_number + 1
+        try:
+            entry = request.body.getvalue()
+            response.status = BAD_REQUEST
 
-            add_new_element_to_store(element_id, request.body.getvalue())
-        
+            if action == BOARD_ADD:
+                if add_new_element_to_store(element_id, entry, True):
+                    entry_number += 1
+                    response.status = STATUS_OK
+
+            elif action == BOARD_DELETE:
+                if delete_element_from_store(element_id, True):
+                    response.status = STATUS_OK
+
+            else:
+                if modify_element_in_store(element_id, request.body.getvalue(), True):
+                    response.status = STATUS_OK
+
+        except Exception as e:
+            print e
+            response.status = INTERNAL_SERVER_ERROR
+
+    def _begin_propagation(action, entry_number, entry=None):
+        thread = Thread(target=propagate_to_vessels("/propagate/{}/{}".format(action, entry_number), entry))
+        thread.daemon = True
+        thread.start()
+
     # ------------------------------------------------------------------------------------------------------
     # EXECUTION
     # ------------------------------------------------------------------------------------------------------
@@ -168,13 +202,13 @@ try:
         # We need to write the other vessels IP, based on the knowledge of their number
 
         # Only start 2 servers when debugging
-        vessel_list["1"] = '10.1.0.1'
-        vessel_list["2"] = '10.1.0.2'
-        vessel_list["3"] = '10.1.0.3'
-        vessel_list["4"] = '10.1.0.4'
+        #vessel_list["1"] = '10.1.0.1'
+        #vessel_list["2"] = '10.1.0.2'
+        #vessel_list["3"] = '10.1.0.3'
+        #vessel_list["4"] = '10.1.0.4'
 
-        #for i in range(1, args.nbv):
-        #    vessel_list[str(i)] = '10.1.0.{}'.format(str(i))
+        for i in range(1, args.nbv+1):
+            vessel_list[str(i)] = '10.1.0.{}'.format(str(i))
 
         try:
             run(app, host=vessel_list[str(node_id)], port=port)

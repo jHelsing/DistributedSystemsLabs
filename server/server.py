@@ -28,9 +28,9 @@ INTERNAL_SERVER_ERROR = 500
 try:
     app = Bottle()
 
-    # Dictionary to hold the entries to the board
+    # Dictionary to represent the board
     board = {}
-    # Each entry in the dictionary gets an entry
+    # Each entry gets a sequence number
     entry_number = 1
 
     # ------------------------------------------------------------------------------------------------------
@@ -41,8 +41,8 @@ try:
         global board, node_id, entry_number
         success = False
         try:
-            # If a propagated call arrives after we have added an entry directly, then we don't want to override the
-            # already present item in the board. Therefore, increase the sequence number until there is no entry
+
+            # If the sequence numbers are not synced between servers we need to make sure that we don't override an entry
             while board.get(entry_sequence) is not None:
                 entry_sequence += 1
 
@@ -181,6 +181,7 @@ try:
             # Set the default response status
             response.status = BAD_REQUEST
 
+            # If the acton was successful then set the response code to indicate this. Applies for all actions
             if action == BOARD_ADD:
                 if add_new_element_to_store(element_id, entry, True):
                     entry_number += 1

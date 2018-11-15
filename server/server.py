@@ -16,13 +16,15 @@ from threading import Thread
 from bottle import Bottle, run, request, template, response, HTTPResponse
 import requests
 
-BOARD_ADD = 'Add'
-BOARD_DELETE = 'Delete'
-BOARD_MODIFY = 'Modify'
+BOARD_ADD = 'add'
+BOARD_DELETE = 'delete'
+BOARD_MODIFY = 'modify'
 
 OK = 200
 BAD_REQUEST = 400
 INTERNAL_SERVER_ERROR = 500
+
+JSON_DATA = "application/json"
 
 START_NODE = 1
 
@@ -77,14 +79,7 @@ try:
         global board, node_id, entry_number
         success = False
         try:
-
-            # If the sequence numbers are not synced between servers we need to make sure that we don't override an entry
-            while board.get(entry_sequence) is not None:
-                entry_sequence += 1
-
             board[entry_sequence] = element
-            # Sync the global variable where we added the latest entry
-            entry_number = entry_sequence
             success = True
         except Exception as e:
             print e
@@ -158,7 +153,13 @@ try:
     # ------------------------------------------------------------------------------------------------------
     @app.route('/')
     def index():
-        global board, node_id
+        global board, node_id, vessel_list
+        """
+        TODO
+        
+        We need to ask the leader here what the current board is and update it
+        """
+        board = requests.get("http://{}/askleader/getboard".format(vessel_list[str(leader_node)])).json()
         # Sort dictionary when sending it, since when looping through a dictionary the order is not preserved
         return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)), members_name_string='Anton Solback')
 
@@ -174,15 +175,27 @@ try:
         Adds a new element to the board
         Called directly when a user is doing a POST request on /board
         '''
-        global board, node_id, entry_number
+        global board, node_id, entry_number, vessel_list
         try:
             entry = request.forms.get('entry')
             # Set the default response status
             response.status = BAD_REQUEST
 
             if add_new_element_to_store(entry_number, entry):
+
+                """
+                First naive solution
+                Client adds new message -> this vessel sends message to leader -> 
+                leader determines order -> leader sends back current board -> this vessel updates board -> 
+                client will see correct board
+                """
                 # Start new thread to propagate
-                _begin_propagation("/propagate/{}/{}".format(BOARD_ADD, entry_number), entry)
+                print "http://{}/askleader/{}".format(vessel_list[str(leader_node)], BOARD_ADD)
+                res = requests.post("http://{}/askleader/{}".format(vessel_list[str(leader_node)], BOARD_ADD), data=entry)
+
+                print res.json()
+                board = res.json()
+
                 entry_number += 1
                 # We successfully added an item, change response code
                 response.status = OK
@@ -246,8 +259,8 @@ try:
 
         return response
 
-    @app.post('/leader/decide')
-    def leader_decision():
+    @app.post('/leader/<action>')
+    def leader_decision(action):
         """
         Route used to decide who the leader is
         :return:
@@ -255,45 +268,79 @@ try:
         global vessel_list, node_id, leader_node
 
         try:
-            current_leader_node = request.forms.get("current_leader_node")
-            current_leader_number = request.forms.get("current_leader_number")
-
-            if node_id == START_NODE:
-                _begin_propagation("/leader/confirm", {"leader_node":current_leader_node})
-                leader_node = current_leader_node
-                response = OK
+            if action == "confirm":
+                leader_node = request.forms.get("leader_node")
+                print "Leader node: " + leader_node
             else:
-                # Send message to next vessel
-                next_vessel = get_next_ip(vessel_list, str(int(node_id)+1))
+                current_leader_node = request.forms.get("current_leader_node")
+                current_leader_number = request.forms.get("current_leader_number")
 
-                if leader_number > current_leader_number:
-                    current_leader_node = node_id
-                    current_leader_number = leader_number
+                if node_id == START_NODE:
+                    # We have visited all vessels, propagate message to other servers that they should confirm leader node
+                    _begin_propagation("/leader/confirm", {"leader_node":current_leader_node})
+                    leader_node = current_leader_node
+                else:
+                    # Send message to next vessel
+                    next_vessel = get_next_ip(vessel_list, str(int(node_id)+1))
 
-                data_to_send = {
-                    "current_leader_node": current_leader_node,
-                    "current_leader_number": current_leader_number
-                }
-                # Make new request
-                requests.post('http://{}/leader/decide'.format(next_vessel), data=data_to_send)
+                    if leader_number > int(current_leader_number):
+                        new_leader_node = node_id
+                        new_leader_number = leader_number
+
+                        data_to_send = {
+                            "current_leader_node": new_leader_node,
+                            "current_leader_number": new_leader_number
+                        }
+                    else:
+                        data_to_send = {
+                            "current_leader_node": current_leader_node,
+                            "current_leader_number": current_leader_number
+                        }
+
+                    requests.post('http://{}/leader/decide'.format(next_vessel), data=data_to_send)
 
         except Exception as e:
             print e
             response.status = INTERNAL_SERVER_ERROR
+    # ------------------------------------------------------------------------------------------------------
 
-    @app.post('/leader/confirm')
-    def leader_confirm():
-        """
-        Used to confirm the leader to all the other nodes
-        :return:
-        """
+    # ------------------------------------------------------------------------------------------------------
+    # LEADER ACTIONS
+    # ------------------------------------------------------------------------------------------------------
+    # a single example (index) should be done for get, and one for postGive it to the students-----------------------------------------------------------------------------------------------------
+    # Execute the code
+    @app.post('/askleader/<action>')
+    def ask_leader(action):
+        global entry_number
+
         try:
-            data = request.forms.get("leader_node")
-            print "Leader node is:", data
+            if action == BOARD_ADD:
+                add_new_element_to_store(entry_number, request.body.getvalue())
+                entry_number += 1
+
+
+            return HTTPResponse(
+                status=200,
+                body=json.dumps(board),
+                content_type=JSON_DATA
+            )
 
         except Exception as e:
             print e
             response.status = INTERNAL_SERVER_ERROR
+
+    @app.get('/askleader/getboard')
+    def return_board():
+        try:
+            return HTTPResponse(
+                status=200,
+                body=json.dumps(board),
+                content_type=JSON_DATA
+            )
+        except Exception as e:
+            print e
+            response.status = INTERNAL_SERVER_ERROR
+    # ------------------------------------------------------------------------------------------------------
 
     # ------------------------------------------------------------------------------------------------------
     # EXECUTION

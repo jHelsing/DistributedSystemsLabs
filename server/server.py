@@ -11,9 +11,9 @@ import time
 import json
 import argparse
 import operator
+import random
 from threading import Thread
-
-from bottle import Bottle, run, request, template, response
+from bottle import Bottle, run, request, template, response, HTTPResponse
 import requests
 
 BOARD_ADD = 'Add'
@@ -24,6 +24,8 @@ OK = 200
 BAD_REQUEST = 400
 INTERNAL_SERVER_ERROR = 500
 
+START_NODE = 1
+
 # ------------------------------------------------------------------------------------------------------
 try:
     app = Bottle()
@@ -32,6 +34,40 @@ try:
     board = {}
     # Each entry gets a sequence number
     entry_number = 1
+
+    leader_number = random.randint(0, 1000)
+    leader_node = 0
+
+    def decide_leader():
+        """
+        A method that initiates the leader decision conversation
+        """
+        global vessel_list, node_id
+
+        try:
+            # So that all servers start
+            time.sleep(2)
+            # This node starts the conversation starts the conversation"
+            if node_id == START_NODE:
+                # Acquire IP address of next vessel
+                next_vessel = get_next_ip(vessel_list, str(int(node_id)+1))
+                data_to_send = {
+                    "current_leader_node": node_id,
+                    "current_leader_number": leader_number
+                }
+                # Make initial request
+                requests.post('http://{}/leader/decide'.format(next_vessel), data=data_to_send)
+
+        except Exception as e:
+            print e
+
+    def get_next_ip(vessel_list, next_node_id):
+        try:
+            if vessel_list.get(next_node_id, None) is None:
+                next_node_id = "1"
+            return vessel_list[next_node_id]
+        except Exception as e:
+            print e
 
     # ------------------------------------------------------------------------------------------------------
     # BOARD FUNCTIONS
@@ -105,6 +141,15 @@ try:
                 if not success:
                     print "\n\nCould not contact vessel {}\n\n".format(vessel_id)
 
+    def _begin_propagation(url, entry=None):
+        """
+        Since there are muliple places where we want to start a new
+        thread, just extract that functionality here to avoid duplication
+        """
+        thread = Thread(target=propagate_to_vessels, args=(url, entry))
+        thread.daemon = True
+        thread.start()
+
 
     # ------------------------------------------------------------------------------------------------------
     # ROUTES
@@ -137,7 +182,7 @@ try:
 
             if add_new_element_to_store(entry_number, entry):
                 # Start new thread to propagate
-                _begin_propagation(BOARD_ADD, entry_number, entry)
+                _begin_propagation("/propagate/{}/{}".format(BOARD_ADD, entry_number), entry)
                 entry_number += 1
                 # We successfully added an item, change response code
                 response.status = OK
@@ -159,13 +204,13 @@ try:
             if action_to_perform == "0":
                 if modify_element_in_store(element_id, entry):
                     # Start new thread to propagate
-                    _begin_propagation(BOARD_MODIFY, element_id, entry)
+                    _begin_propagation("/propagate/{}/{}".format(BOARD_MODIFY, element_id), entry)
                     response.status = OK
             # Delete
             else:
                 if delete_element_from_store(element_id):
                     # Start new thread to propagate
-                    _begin_propagation(BOARD_DELETE, element_id)
+                    _begin_propagation("/propagate/{}/{}".format(BOARD_DELETE, element_id))
                     response.status = OK
 
         except Exception as e:
@@ -199,14 +244,56 @@ try:
             print e
             response.status = INTERNAL_SERVER_ERROR
 
-    def _begin_propagation(action, entry_number, entry=None):
+        return response
+
+    @app.post('/leader/decide')
+    def leader_decision():
         """
-        Since there are muliple places where we want to start a new
-        thread, just extract that functionality here to avoid duplication
+        Route used to decide who the leader is
+        :return:
         """
-        thread = Thread(target=propagate_to_vessels, args=("/propagate/{}/{}".format(action, entry_number), entry))
-        thread.daemon = True
-        thread.start()
+        global vessel_list, node_id, leader_node
+
+        try:
+            current_leader_node = request.forms.get("current_leader_node")
+            current_leader_number = request.forms.get("current_leader_number")
+
+            if node_id == START_NODE:
+                _begin_propagation("/leader/confirm", {"leader_node":current_leader_node})
+                leader_node = current_leader_node
+                response = OK
+            else:
+                # Send message to next vessel
+                next_vessel = get_next_ip(vessel_list, str(int(node_id)+1))
+
+                if leader_number > current_leader_number:
+                    current_leader_node = node_id
+                    current_leader_number = leader_number
+
+                data_to_send = {
+                    "current_leader_node": current_leader_node,
+                    "current_leader_number": current_leader_number
+                }
+                # Make new request
+                requests.post('http://{}/leader/decide'.format(next_vessel), data=data_to_send)
+
+        except Exception as e:
+            print e
+            response.status = INTERNAL_SERVER_ERROR
+
+    @app.post('/leader/confirm')
+    def leader_confirm():
+        """
+        Used to confirm the leader to all the other nodes
+        :return:
+        """
+        try:
+            data = request.forms.get("leader_node")
+            print "Leader node is:", data
+
+        except Exception as e:
+            print e
+            response.status = INTERNAL_SERVER_ERROR
 
     # ------------------------------------------------------------------------------------------------------
     # EXECUTION
@@ -224,12 +311,16 @@ try:
         node_id = args.nid
         vessel_list = dict()
         # We need to write the other vessels IP, based on the knowledge of their number
-
         for i in range(1, args.nbv+1):
             vessel_list[str(i)] = '10.1.0.{}'.format(str(i))
 
         try:
+            if node_id == START_NODE:
+                thread = Thread(target=decide_leader)
+                thread.daemon = True
+                thread.start()
             run(app, host=vessel_list[str(node_id)], port=port)
+
         except Exception as e:
             print e
     # ------------------------------------------------------------------------------------------------------

@@ -54,7 +54,7 @@ class Lab1Topology( Topo ):
                 # we create the server
                 servers.append(self.addHost("vessel%d" % (globalId+1), ip=("10.1.0.%d/24" % (globalId+1))))
                 # We add link towards the reginal switch
-                self.addLink(switches[regionId], servers[globalId], bw = regionalLinkBandwidth, loss = regionalLinkLosses, delay = "%dms" % regionalDelay)
+                self.addLink(switches[regionId], servers[globalId], bw = regionalLinkBandwidth, loss=1, delay='%dms' % regionalDelay)
             # We do the same with clients
             for clientId in range(0, nbOfClientsPerRegion):
                 # clientId is a regional Id, we want a global one
@@ -62,9 +62,9 @@ class Lab1Topology( Topo ):
                 # we create the server
                 clients.append(self.addHost("client%d" % (globalId+1), ip=("10.1.0.%d/24" % (100+globalId))))
                 # We add link towards the reginal switch
-                self.addLink(switches[regionId], clients[globalId], bw = regionalLinkBandwidth, loss = regionalLinkLosses, delay = "%dms" % regionalDelay)
+                self.addLink(switches[regionId], clients[globalId], bw = regionalLinkBandwidth, loss=1, delay='%dms' % regionalDelay)
             # We must also connect the regional switch to the central switch
-            self.addLink(centralSwitch, switches[regionId], bw = globalLinkBandwidth, loss = globalLinkLosses, delay = "%dms" % globalDelay)
+            self.addLink(centralSwitch, switches[regionId], bw = globalLinkBandwidth, loss=1, delay='%dms' % globalDelay)
 #------------------------------------------------------------------------------------------------------
 
 

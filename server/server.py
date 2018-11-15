@@ -20,7 +20,7 @@ BOARD_ADD = 'Add'
 BOARD_DELETE = 'Delete'
 BOARD_MODIFY = 'Modify'
 
-STATUS_OK = 200
+OK = 200
 BAD_REQUEST = 400
 INTERNAL_SERVER_ERROR = 500
 
@@ -28,18 +28,27 @@ INTERNAL_SERVER_ERROR = 500
 try:
     app = Bottle()
 
+    # Dictionary to hold the entries to the board
     board = {}
-    entry_number = 0
+    # Each entry in the dictionary gets an entry
+    entry_number = 1
 
     # ------------------------------------------------------------------------------------------------------
     # BOARD FUNCTIONS
     # Should nopt be given to the student
     # ------------------------------------------------------------------------------------------------------
     def add_new_element_to_store(entry_sequence, element, is_propagated_call=False):
-        global board, node_id
+        global board, node_id, entry_number
         success = False
         try:
+            # If a propagated call arrives after we have added an entry directly, then we don't want to override the
+            # already present item in the board. Therefore, increase the sequence number until there is no entry
+            while board.get(entry_sequence) is not None:
+                entry_sequence += 1
+
             board[entry_sequence] = element
+            # Sync the global variable where we added the latest entry
+            entry_number = entry_sequence
             success = True
         except Exception as e:
             print e
@@ -105,11 +114,13 @@ try:
     @app.route('/')
     def index():
         global board, node_id
+        # Sort dictionary when sending it, since when looping through a dictionary the order is not preserved
         return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)), members_name_string='Anton Solback')
 
     @app.get('/board')
     def get_board():
         global board, node_id
+        # Sort dictionary when sending it, since when looping through a dictionary the order is not preserved
         return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)))
     # ------------------------------------------------------------------------------------------------------
     @app.post('/board')
@@ -121,12 +132,15 @@ try:
         global board, node_id, entry_number
         try:
             entry = request.forms.get('entry')
+            # Set the default response status
             response.status = BAD_REQUEST
 
             if add_new_element_to_store(entry_number, entry):
-                response.status = STATUS_OK
+                # Start new thread to propagate
                 _begin_propagation(BOARD_ADD, entry_number, entry)
                 entry_number += 1
+                # We successfully added an item, change response code
+                response.status = OK
 
         except Exception as e:
             print e
@@ -134,21 +148,25 @@ try:
 
     @app.post('/board/<element_id:int>/')
     def client_action_received(element_id):
-
+        # Receives an action to perform on the board
         try:
             action_to_perform = request.forms.get('action')
             entry = request.forms.get("entry")
+            # Set the default response status
             response.status = BAD_REQUEST
 
+            # Modify
             if action_to_perform == "0":
                 if modify_element_in_store(element_id, entry):
-                    response.status = STATUS_OK
+                    # Start new thread to propagate
                     _begin_propagation(BOARD_MODIFY, element_id, entry)
-
+                    response.status = OK
+            # Delete
             else:
                 if delete_element_from_store(element_id):
-                    response.status = STATUS_OK
+                    # Start new thread to propagate
                     _begin_propagation(BOARD_DELETE, element_id)
+                    response.status = OK
 
         except Exception as e:
             print e
@@ -160,27 +178,32 @@ try:
 
         try:
             entry = request.body.getvalue()
+            # Set the default response status
             response.status = BAD_REQUEST
 
             if action == BOARD_ADD:
                 if add_new_element_to_store(element_id, entry, True):
                     entry_number += 1
-                    response.status = STATUS_OK
+                    response.status = OK
 
             elif action == BOARD_DELETE:
                 if delete_element_from_store(element_id, True):
-                    response.status = STATUS_OK
+                    response.status = OK
 
             else:
                 if modify_element_in_store(element_id, request.body.getvalue(), True):
-                    response.status = STATUS_OK
+                    response.status = OK
 
         except Exception as e:
             print e
             response.status = INTERNAL_SERVER_ERROR
 
     def _begin_propagation(action, entry_number, entry=None):
-        thread = Thread(target=propagate_to_vessels("/propagate/{}/{}".format(action, entry_number), entry))
+        """
+        Since there are muliple places where we want to start a new
+        thread, just extract that functionality here to avoid duplication
+        """
+        thread = Thread(target=propagate_to_vessels, args=("/propagate/{}/{}".format(action, entry_number), entry))
         thread.daemon = True
         thread.start()
 
@@ -200,12 +223,6 @@ try:
         node_id = args.nid
         vessel_list = dict()
         # We need to write the other vessels IP, based on the knowledge of their number
-
-        # Only start 2 servers when debugging
-        #vessel_list["1"] = '10.1.0.1'
-        #vessel_list["2"] = '10.1.0.2'
-        #vessel_list["3"] = '10.1.0.3'
-        #vessel_list["4"] = '10.1.0.4'
 
         for i in range(1, args.nbv+1):
             vessel_list[str(i)] = '10.1.0.{}'.format(str(i))

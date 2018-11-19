@@ -255,6 +255,7 @@ try:
 
             # Leader should only talk to other servers
             if node_id != leader_node:
+                # TODO - Add item to own board
                 data_to_send = {
                     "entry": entry
                 }
@@ -264,6 +265,7 @@ try:
 
         except requests.RequestException:
             # Leader is not up
+            # TODO - Need to ask other servers that I can restart the leader election so that it isn't restarted all the time
             _restart_leader_election()
         except Exception as e:
             print e
@@ -280,6 +282,7 @@ try:
 
             if node_id != leader_node:
                 if action_to_perform == "0":
+                    # TODO - Add item to own board
                     data_to_send = {
                             "entry_sequence": element_id,
                             "entry": entry
@@ -287,6 +290,7 @@ try:
                     requests.post("http://{}/askleader/{}".format(leader_ip, BOARD_MODIFY),
                                           headers=JSON_DATA_HEADER, json=data_to_send)
                 else:
+                    # TODO - Add item to own board
                     data_to_send = {
                         "entry_sequence": element_id
                     }
@@ -294,7 +298,9 @@ try:
                                           headers=JSON_DATA_HEADER, json=data_to_send)
 
         except requests.RequestException:
-            # Leader is not up
+            # Leader is not up# Since we only send a propagation when the operation was successful we assume that we will be able to
+            # add it
+            # TODO - Need to ask other servers that I can restart the leader election so that it isn't restarted all the time
             _restart_leader_election()
         except Exception as e:
             print e
@@ -341,6 +347,7 @@ try:
                 print "Leader is node:", leader_node
             elif action == LEADER_REINITIATE:
                 START_NODE = int(payload["start_node"])
+                # TODO - Indicate that the leader election is in process so that it doesn't start while its in progress
             else:
                 current_leader_node = int(payload["current_leader_node"])
                 current_leader_number = int(payload["current_leader_number"])

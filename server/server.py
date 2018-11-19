@@ -41,14 +41,15 @@ try:
         global board, node_id, entry_number
         success = False
         try:
-
-            # If the sequence numbers are not synced between servers we need to make sure that we don't override an entry
-            # This will however, lead to that the boards between servers are not the same
+            # If the sequence numbers are not synced between servers we need to make sure that we don't override an
+            # entry. This will however, lead to that the boards between servers are not the same,
+            # we don't need to worry about propagated calls in this solution
             while board.get(entry_sequence) is not None:
                 entry_sequence += 1
 
             board[entry_sequence] = element
-            # Sync the global variable where we added the latest entry so we know where to add the next entry
+            # Sync the global variable where we added the latest entry so we know where to add the next entry and
+            # increment it after this method
             entry_number = entry_sequence
             success = True
         except Exception as e:
@@ -187,6 +188,8 @@ try:
                 entry_number += 1
 
             elif action == BOARD_DELETE:
+                # Since we only send a propagation when the operation was successful we assume that we will be able to
+                # modify it
                 delete_element_from_store(element_id, True)
 
             else:

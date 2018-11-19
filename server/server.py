@@ -43,11 +43,12 @@ try:
         try:
 
             # If the sequence numbers are not synced between servers we need to make sure that we don't override an entry
+            # This will however, lead to that the boards between servers are not the same
             while board.get(entry_sequence) is not None:
                 entry_sequence += 1
 
             board[entry_sequence] = element
-            # Sync the global variable where we added the latest entry
+            # Sync the global variable where we added the latest entry so we know where to add the next entry
             entry_number = entry_sequence
             success = True
         except Exception as e:
@@ -58,6 +59,7 @@ try:
         global board, node_id
         success = False
         try:
+            # Replace existing entry with modified one
             board[entry_sequence] = modified_element
             success = True
         except Exception as e:
@@ -68,6 +70,7 @@ try:
         global board, node_id
         success = False
         try:
+            # Remove item from board
             del board[entry_sequence]
             success = True
         except Exception as e:
@@ -114,13 +117,13 @@ try:
     @app.route('/')
     def index():
         global board, node_id
-        # Sort dictionary when sending it, since when looping through a dictionary the order is not preserved
+        # Sort dictionary on the entry_number in the dictionary
         return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)), members_name_string='Anton Solback')
 
     @app.get('/board')
     def get_board():
         global board, node_id
-        # Sort dictionary when sending it, since when looping through a dictionary the order is not preserved
+        # Sort dictionary on the entry_number in the dictionary
         return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)))
     # ------------------------------------------------------------------------------------------------------
     @app.post('/board')
@@ -132,15 +135,14 @@ try:
         global board, node_id, entry_number
         try:
             entry = request.forms.get('entry')
-            # Set the default response status
-            response.status = BAD_REQUEST
 
+            # Check if we successfully added the item to the board
             if add_new_element_to_store(entry_number, entry):
-                # Start new thread to propagate
+                # If we added it to our own board we need to tell others about it
                 _begin_propagation(BOARD_ADD, entry_number, entry)
+                # Increment sequence number next time we want to add something
                 entry_number += 1
                 # We successfully added an item, change response code
-                response.status = OK
 
         except Exception as e:
             print e
@@ -152,21 +154,19 @@ try:
         try:
             action_to_perform = request.forms.get('action')
             entry = request.forms.get("entry")
-            # Set the default response status
-            response.status = BAD_REQUEST
 
             # Modify
             if action_to_perform == "0":
+                # If modification was successful, send it to others
                 if modify_element_in_store(element_id, entry):
                     # Start new thread to propagate
                     _begin_propagation(BOARD_MODIFY, element_id, entry)
-                    response.status = OK
             # Delete
             else:
+                # If deletion was successful, send it to others
                 if delete_element_from_store(element_id):
                     # Start new thread to propagate
                     _begin_propagation(BOARD_DELETE, element_id)
-                    response.status = OK
 
         except Exception as e:
             print e
@@ -178,22 +178,21 @@ try:
 
         try:
             entry = request.body.getvalue()
-            # Set the default response status
-            response.status = BAD_REQUEST
 
-            # If the acton was successful then set the response code to indicate this. Applies for all actions
+            # Someone has added something to the board
             if action == BOARD_ADD:
-                if add_new_element_to_store(element_id, entry, True):
-                    entry_number += 1
-                    response.status = OK
+                # Since we only send a propagation when the operation was successful we assume that we will be able to
+                # add it
+                add_new_element_to_store(element_id, entry, True)
+                entry_number += 1
 
             elif action == BOARD_DELETE:
-                if delete_element_from_store(element_id, True):
-                    response.status = OK
+                delete_element_from_store(element_id, True)
 
             else:
-                if modify_element_in_store(element_id, request.body.getvalue(), True):
-                    response.status = OK
+                # Since we only send a propagation when the operation was successful we assume that we will be able to
+                # modify it
+                modify_element_in_store(element_id, request.body.getvalue(), True)
 
         except Exception as e:
             print e

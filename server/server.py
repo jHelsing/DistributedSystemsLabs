@@ -11,6 +11,7 @@ import time
 import json
 import argparse
 import operator
+from datetime import datetime
 import random
 from threading import Thread
 from bottle import Bottle, run, request, template, response, HTTPResponse
@@ -23,6 +24,12 @@ BOARD_MODIFY = 'modify'
 LEADER_CONFIRM = "confirm"
 LEADER_REINITIATE = "reinitiate"
 LEADER_DECIDE = "decide"
+
+CONFIRM_ELECTION_START = "confirm_election_start"
+CONFIRM_ELECTION_START_OK = "Ok"
+CONFIRM_ELECTION_START_NO = "No"
+
+TIMESTAMP_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
 
 OK = 200
 BAD_REQUEST = 400
@@ -44,6 +51,19 @@ try:
     # Every node's start number in the election process
     election_number = random.randint(0, 1000)
 
+    """
+    A flag that the server that started the election progress sets to True. Consider a scenario: The leader has just 
+    gone down and server 3 for instance has initated the leader decision. If almost directly after server 2 also gets a 
+    request and sees that the leader is down, then this server will also try to imitate a leader decision. However 
+    since server 3 has already stated the process we don't want server 2 to do it as well. So when the request comes to 
+    server 3 it should see that this variable is true and send back a response that the process has already started. 
+    Since this works like a lock, if a server crashes in the middle of the election process and can't pass the message 
+    along the ring this value will never be false and we will not be able to select a new leader. Therefore, you need 
+    to somehow release the "lock" after some time if the election process hasn't finished.
+    """
+    is_election_ongoing = False
+    leader_election_init_timestamp = None
+
     # Leader info
     leader_number = 0
     leader_node = 0
@@ -53,39 +73,36 @@ try:
         # ------------------------------------------------------------------------------------------------------
         # INIT FUNCTIONS
         # ------------------------------------------------------------------------------------------------------
-        global vessel_list, node_id, leader_node, leader_ip
+        global vessel_list, node_id, leader_node, leader_ip, is_election_ongoing
 
         try:
-            # Wait until servers has started
             time.sleep(1)
 
+            is_election_ongoing = True
+
             is_successful_request = False
+
             next_node = START_NODE + 1
 
             while is_successful_request is False:
 
-                # We have reached the end of the dictionary start from the beginning
                 if next_node > len(vessel_list):
                     next_node = 1
 
-                # No other server is reachable
                 if node_id == next_node:
-                    # We have tried to contact all other vessels and no one is alive
                     leader_node, leader_ip = None, None
                     return
 
                 next_vessel = vessel_list.get(next_node)
 
-                # We send our information
                 data = {
                     'current_leader_node': node_id,
                     'current_leader_number': election_number
                 }
 
                 try:
-                    res = requests.post('http://{}/leader/{}'.format(next_vessel, LEADER_DECIDE), headers=JSON_DATA_HEADER, json=data)
+                    res = requests.post('http://{}/leader/{}'.format(next_vessel, LEADER_DECIDE), headers=JSON_DATA_HEADER, json=data, timeout=10)
 
-                    # We were able to contact a server
                     if res.status_code == OK:
                         is_successful_request = True
                     else:
@@ -103,36 +120,47 @@ try:
     # ------------------------------------------------------------------------------------------------------
 
     def _restart_leader_election():
-        global START_NODE
-        """
-        Leader can't be contacted, therefore try to select a new leader.
-        1. Set START_NODE to your own node_id so we now when we need to stop.
-        2. Send updated START_NODE to other vessel. This is because the previous start_node need to know
-        that we are starting from another node so that we can go a full circle in the leader election
+        global START_NODE, vessel_list, node_id, is_election_ongoing, leader_election_init_timestamp
 
-        First solution:
-        Since this node initiated the leader decision, it needs to know when we have visited all other nodes.
-        Currently, the way this is done is that it listens for /leader/decide and if node_if is START_NODE
-        then we have gone through all nodes and can decide who will be the next leader and send this to all
-        other vessels. Since we need to listen on that endpoint we need to start the leader_decision in
-        another thread. The downside is that we don't now here who the new leader is so we can't add the new
-        entry in the board. We can't add to ours either since then it won't be synced with the others. A
-        solution would be to send back a message to the client and ask them to re-enter the message.
-        """
+        leader_election_init_timestamp = datetime.now()
+
+        print "Timestamp:", leader_election_init_timestamp
+
         START_NODE = node_id
+        data = {
+            "timestamp": leader_election_init_timestamp.strftime(TIMESTAMP_FORMAT)
+        }
+
+        for vessel_id, vessel_ip in vessel_list.items():
+            print "Type of:", type(vessel_id)
+            if vessel_id != node_id:
+                try:
+                    res = requests.post("http://{}/leader/{}".format(vessel_ip, LEADER_REINITIATE),
+                                        headers=JSON_DATA_HEADER, json=data).json()
+
+                    if res[CONFIRM_ELECTION_START] == CONFIRM_ELECTION_START_NO:
+                        leader_election_init_timestamp = None
+                        return
+
+                except requests.RequestException:
+                    pass
+
+        # The server that reaches this position will start the leader selection process. Send start node and mark for
+        # other that a leader election is in progress
         data = {
             "start_node": START_NODE
         }
-        propagate_to_vessels("/leader/{}".format(LEADER_REINITIATE), payload=data, headers=JSON_DATA_HEADER)
+        propagate_to_vessels("/leader/{}".format(LEADER_REINITIATE), data, JSON_DATA_HEADER)
 
-        thread = Thread(target=initiate_leader_decision)
-        thread.daemon = True
-        thread.start()
+        leader_election_init_timestamp = None
+        initiate_leader_decision()
 
-    def _begin_propagation(url, payload={}, headers={}):
+    def begin_propagation(url, payload={}, headers={}):
         """
-        Since there are muliple places where we want to start a new
-        thread, just extract that functionality here to avoid duplication
+        Since we use propagate_to_vessels at many places, this method avoid some code duplication
+        :param url: The url to call
+        :param payload: What data to send
+        :param headers: Extra header information, such as Content-type
         """
         thread = Thread(target=propagate_to_vessels, args=(url, payload, headers))
         thread.daemon = True
@@ -246,6 +274,7 @@ try:
             print e
             response.status = INTERNAL_SERVER_ERROR
     # ------------------------------------------------------------------------------------------------------
+
     @app.post('/board')
     def client_add_received():
         global board, node_id, entry_sequence, vessel_list, START_NODE
@@ -253,20 +282,29 @@ try:
         try:
             entry = request.forms.get('entry')
 
-            # Leader should only talk to other servers
             if node_id != leader_node:
-                # TODO - Add item to own board
                 data_to_send = {
                     "entry": entry
                 }
                 # To see if leader is up or not
                 requests.post("http://{}/askleader/{}".format(leader_ip, BOARD_ADD),
                               headers=JSON_DATA_HEADER, json=data_to_send)
+            else:
+                board_actions(BOARD_ADD, entry=entry)
 
         except requests.RequestException:
             # Leader is not up
-            # TODO - Need to ask other servers that I can restart the leader election so that it isn't restarted all the time
-            _restart_leader_election()
+            if is_election_ongoing is False:
+                # If two requests are made at the same time to restart leader election without starting another thread
+                # the main thread will be busy waiting for the other servers to respond to the request to start the
+                # leader election and the program will deadlock, at the moment, if server 1 sends a LEADER_REINITIATE
+                # message and a client would try to add a message on server 2 and the client adds the message before
+                # the LEADER_REINITATE has been recieved then they will cancel each other out
+                # TODO - Add timestamps to determine who gets to start the leader election
+                thread = Thread(target=_restart_leader_election)
+                thread.daemon = True
+                thread.start()
+
         except Exception as e:
             print e
             response.status = INTERNAL_SERVER_ERROR
@@ -278,11 +316,8 @@ try:
             action_to_perform = request.forms.get("action")
             entry = request.forms.get("entry")
 
-            response.status = BAD_REQUEST
-
-            if node_id != leader_node:
-                if action_to_perform == "0":
-                    # TODO - Add item to own board
+            if action_to_perform == "0":
+                if node_id != leader_node:
                     data_to_send = {
                             "entry_sequence": element_id,
                             "entry": entry
@@ -290,18 +325,20 @@ try:
                     requests.post("http://{}/askleader/{}".format(leader_ip, BOARD_MODIFY),
                                           headers=JSON_DATA_HEADER, json=data_to_send)
                 else:
-                    # TODO - Add item to own board
+                    board_actions(BOARD_MODIFY, element_id, entry)
+            else:
+                if node_id != leader_node:
                     data_to_send = {
                         "entry_sequence": element_id
                     }
                     requests.post("http://{}/askleader/{}".format(leader_ip, BOARD_DELETE),
                                           headers=JSON_DATA_HEADER, json=data_to_send)
+                else:
+                    board_actions(BOARD_DELETE, requested_entry_sequence=element_id)
 
         except requests.RequestException:
-            # Leader is not up# Since we only send a propagation when the operation was successful we assume that we will be able to
-            # add it
-            # TODO - Need to ask other servers that I can restart the leader election so that it isn't restarted all the time
-            _restart_leader_election()
+            if not is_election_ongoing:
+                _restart_leader_election()
         except Exception as e:
             print e
             response.status = INTERNAL_SERVER_ERROR
@@ -330,10 +367,18 @@ try:
     @app.post('/leader/<action>')
     def leader_decision(action):
         """
-        Route used to decide who the leader is
-        :return:
+        This route handles requests/actions that concern the process of choosing the leader server.
+
+        :param action: What action we should perform. They are the following:
+            LEADER_CONFIRM: We have selected a new leader, confirm this and set information about the newly elected leader
+            LEADER_REINITIATE: The previous leader is not responding therefore start over the election process
+            LEADER_DECIDE: This action is performed during the electing process and sends a request to the next node in
+                the circle algorithm.
+
+        :return: Return a Http response with internal server error if there were an exception. A json object if the
+            action was to reinitiate the election process otherwise a response with status code 200
         """
-        global vessel_list, node_id, leader_node, leader_ip, START_NODE, leader_number
+        global vessel_list, node_id, leader_node, leader_ip, START_NODE, leader_number, is_election_ongoing, leader_election_init_timestamp
 
         try:
             payload = request.json
@@ -344,26 +389,74 @@ try:
                 leader_ip = payload["leader_ip"]
                 leader_number = int(payload["leader_number"])
 
-                print "Leader is node:", leader_node
+                is_election_ongoing = False
+
             elif action == LEADER_REINITIATE:
-                START_NODE = int(payload["start_node"])
-                # TODO - Indicate that the leader election is in process so that it doesn't start while its in progress
+                if payload.get("start_node", None) is not None:
+                    START_NODE = int(payload["start_node"])
+                    is_election_ongoing = True
+                    return HTTPResponse(status=OK)
+
+                received_timestamp = payload["timestamp"]
+
+                if is_election_ongoing is False:
+
+                    # If timestamp is not none then it means that this server has also tried to initiate a leader
+                    # election. Therefore, compare timestamps to determine who will continue
+                    if leader_election_init_timestamp is not None:
+                        # We favour the server that initiated the call first
+                        if leader_election_init_timestamp > datetime.strptime(received_timestamp, TIMESTAMP_FORMAT):
+                            return HTTPResponse(
+                                status=OK,
+                                headers=JSON_DATA_HEADER,
+                                body=json.dumps({CONFIRM_ELECTION_START: CONFIRM_ELECTION_START_OK})
+                            )
+                        else:
+                            return HTTPResponse(
+                                status=OK,
+                                headers=JSON_DATA_HEADER,
+                                body=json.dumps({CONFIRM_ELECTION_START: CONFIRM_ELECTION_START_NO})
+                            )
+                    else:
+                        return HTTPResponse(
+                            status=OK,
+                            headers=JSON_DATA_HEADER,
+                            body=json.dumps({CONFIRM_ELECTION_START: CONFIRM_ELECTION_START_OK})
+                        )
+
+                else:
+                    return HTTPResponse(
+                        status=OK,
+                        headers=JSON_DATA_HEADER,
+                        body=json.dumps({CONFIRM_ELECTION_START: CONFIRM_ELECTION_START_NO})
+                    )
+
             else:
                 current_leader_node = int(payload["current_leader_node"])
                 current_leader_number = int(payload["current_leader_number"])
 
+                print "START_NODE,", START_NODE
+
+                # We have visited all vessels, propagate message to other servers that they should confirm leader node
                 if node_id == START_NODE:
+
+                    # Indicate that the election process is over
+                    is_election_ongoing = False
+
                     leader_ip = vessel_list[current_leader_node]
                     leader_node = current_leader_node
                     leader_number = current_leader_number
-                    # We have visited all vessels, propagate message to other servers that they should confirm leader node
+
                     data = {
-                        "leader_node":leader_node,
+                        "leader_node": leader_node,
                         "leader_ip": leader_ip,
                         "leader_number": leader_number
                     }
-                    _begin_propagation("/leader/{}".format(LEADER_CONFIRM), payload=data, headers=JSON_DATA_HEADER)
+
+                    begin_propagation("/leader/{}".format(LEADER_CONFIRM), payload=data, headers=JSON_DATA_HEADER)
+
                 else:
+
                     if election_number > current_leader_number:
                         new_leader_node = node_id
                         new_leader_number = election_number
@@ -374,6 +467,7 @@ try:
                         }
 
                     is_successful_request = False
+
                     next_node = node_id + 1
 
                     while is_successful_request is False:
@@ -392,14 +486,12 @@ try:
                             if res.status_code == OK:
                                 is_successful_request = True
                             else:
-                                # TODO - What to do if status_code is Internal Server Error?
-                                pass
+                                next_node += 1
 
                         except requests.RequestException:
-                            # Vessel is not running. Remove from vessel list?
+                            # Some type of connection error occurred while trying to connect to the server. We can check
+                            # for more specific types but at the moment, keep it like this
                             next_node += 1
-
-            return HTTPResponse(status=OK)
 
         except Exception as e:
             print e
@@ -413,32 +505,33 @@ try:
     # Execute the code
     @app.post('/askleader/<action>')
     def ask_leader(action):
-        global entry_sequence
 
         try:
             data = request.json
 
-            if action == BOARD_ADD:
-                add_new_element_to_store(entry_sequence, data["entry"])
-                data = {
-                    "entry_sequence": entry_sequence,
-                    "entry": data["entry"]
-                }
-                _begin_propagation("/propagate/{}".format(BOARD_ADD), payload=data, headers=JSON_DATA_HEADER)
-                entry_sequence += 1
-
-            elif action == BOARD_MODIFY:
-                modify_element_in_store(int(data["entry_sequence"]), data["entry"])
-                _begin_propagation("/propagate/{}".format(BOARD_MODIFY), payload=data, headers=JSON_DATA_HEADER)
-            else:
-                delete_element_from_store(int(data["entry_sequence"]))
-                _begin_propagation("/propagate/{}".format(BOARD_DELETE), payload=data, headers=JSON_DATA_HEADER)
-
-            response.status = OK
+            board_actions(action, data.get("entry_sequence"), data.get("entry"))
 
         except Exception as e:
             print e
             response.status = INTERNAL_SERVER_ERROR
+
+
+    def board_actions(action, requested_entry_sequence=None, entry=None):
+        global entry_sequence
+
+        if action == BOARD_ADD:
+            add_new_element_to_store(entry_sequence, entry)
+            begin_propagation("/propagate/{}".format(BOARD_ADD),
+                              payload={"entry_sequence": entry_sequence, "entry": entry}, headers=JSON_DATA_HEADER)
+            entry_sequence += 1
+        elif action == BOARD_MODIFY:
+            modify_element_in_store(requested_entry_sequence, entry)
+            begin_propagation("/propagate/{}".format(BOARD_MODIFY),
+                              payload={"entry_sequence": requested_entry_sequence, "entry": entry}, headers=JSON_DATA_HEADER)
+        else:
+            delete_element_from_store(requested_entry_sequence)
+            begin_propagation("/propagate/{}".format(BOARD_DELETE), payload={"entry_sequence": requested_entry_sequence},
+                              headers=JSON_DATA_HEADER)
 
     # ------------------------------------------------------------------------------------------------------
 

@@ -79,7 +79,7 @@ try:
 
         try:
 
-            time.sleep(1)
+            time.sleep(10)
 
             is_election_ongoing = True
 
@@ -120,9 +120,8 @@ try:
                         # Exit from the while loop
                         is_successful_request = True
                     else:
-                        # The only other response code we return is internal server error if there were an exception.
-                        # If this is the case, go to the next node
-                        next_node += 1
+                        # We raise an exception here because we want to have the same error handling
+                        raise requests.RequestException
 
                 except requests.RequestException:
                     # There was a error in trying to connect to the server. Move to next server
@@ -148,7 +147,6 @@ try:
 
         # Contact all other servers except self and say that: "I want to reinitiate a leader election. Is that OK?"
         for vessel_id, vessel_ip in vessel_list.items():
-            print "Type of:", type(vessel_id)
             if vessel_id != node_id:
                 try:
                     # Get the response
@@ -429,6 +427,7 @@ try:
                 leader_number = int(payload["leader_number"])
 
                 # Indicate that the election process is over
+                print "Server nr:", leader_node, "is the leader"
                 is_election_ongoing = False
 
             # The leader has gone down an a server wants to reinitate the leader election
@@ -509,6 +508,8 @@ try:
                         "leader_number": leader_number
                     }
 
+                    print "Server nr:", leader_node, "is the leader"
+
                     begin_propagation("/leader/{}".format(LEADER_CONFIRM), payload=data, headers=JSON_DATA_HEADER)
 
                 else:
@@ -535,16 +536,20 @@ try:
                         next_vessel = vessel_list.get(next_node)
                         # In order to get to this point we had to make one initial request so we will eventually make a
                         # request to the one that initiated the conversation, i.e., node_id == START_NODE
+                        print "Contacting server:", next_node
                         try:
                             res = requests.post('http://{}/leader/{}'.format(next_vessel, LEADER_DECIDE),
                                                 headers=JSON_DATA_HEADER, json=payload)
                             # We were able to contact a server
+
                             if res.status_code == OK:
                                 is_successful_request = True
                             else:
-                                next_node += 1
+                                # We raise an exception here because we want to have the same error handling
+                                raise requests.RequestException
 
                         except requests.RequestException:
+                            print "Can't contact server:", next_node
                             # Some type of connection error occurred while trying to connect to the server. We can check
                             # for more specific types but at the moment, keep it like this
                             next_node += 1

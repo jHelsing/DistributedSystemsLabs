@@ -1,6 +1,6 @@
 # coding=utf-8
 # ------------------------------------------------------------------------------------------------------
-# TDA596 - Lab 1
+# TDA596 - Lab 2
 # server/server.py
 # Input: Node_ID total_number_of_ID
 # Student: Anton Solback

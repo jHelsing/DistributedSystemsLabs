@@ -79,7 +79,7 @@ try:
 
         try:
 
-            time.sleep(10)
+            time.sleep(1)
 
             is_election_ongoing = True
 
@@ -133,6 +133,8 @@ try:
     def restart_leader_election():
         """
         If the leader goes down we need to elect a new leader. This method takes care of restarting the election
+        It also handles the case if two server tries to start a new election. It does that by taking a timestamp
+        and compare that to all other servers. The server with the lowest timestamp will be allowed to proceed
         """
         global START_NODE, vessel_list, node_id, leader_election_init_timestamp
 
@@ -161,7 +163,7 @@ try:
                         return
 
                 except requests.RequestException:
-                    # If a server isn't
+                    # If a server isn't up and running we ignore it's response
                     pass
 
         # The server that reaches this position will start the leader selection process. Send start node and mark for
@@ -320,7 +322,7 @@ try:
             if is_election_ongoing is False:
                 # Election is not in progress. Try to start a new election process. We need to start a new thread here
                 # since if we can start a new election we need to listen to /leader/decide when we have gone a full lap
-                # in the circle algorithm and if two start at the same time, we need to compare timestamps
+                # in the circle algorithm.
                 thread = Thread(target=restart_leader_election)
                 thread.daemon = True
                 thread.start()
@@ -368,8 +370,10 @@ try:
         except requests.RequestException:
             # Leader can't be contacted
             if not is_election_ongoing:
-                # There is no election already in progress. Try to start a new one
-                restart_leader_election()
+                # There is no election already in progress. Try to start a new one.
+                thread = Thread(target=restart_leader_election)
+                thread.daemon = True
+                thread.start()
         except Exception as e:
             print e
             response.status = INTERNAL_SERVER_ERROR
@@ -430,7 +434,7 @@ try:
                 print "Server nr:", leader_node, "is the leader"
                 is_election_ongoing = False
 
-            # The leader has gone down an a server wants to reinitate the leader election
+            # The leader has gone down an a server wants to reinitiate the leader election
             elif action == LEADER_REINITIATE:
                 # A server will only send a request with a json object containing start_node if that server has been
                 # chosen to start the new election process
@@ -511,8 +515,9 @@ try:
                     print "Server nr:", leader_node, "is the leader"
 
                     begin_propagation("/leader/{}".format(LEADER_CONFIRM), payload=data, headers=JSON_DATA_HEADER)
-
+                # We haven't arrived at the start node
                 else:
+                    # Compare our random generated number to the current largest one
                     if election_number > current_leader_number:
                         new_leader_node = node_id
                         new_leader_number = election_number
@@ -534,8 +539,7 @@ try:
                             next_node = 1
 
                         next_vessel = vessel_list.get(next_node)
-                        # In order to get to this point we had to make one initial request so we will eventually make a
-                        # request to the one that initiated the conversation, i.e., node_id == START_NODE
+
                         print "Contacting server:", next_node
                         try:
                             res = requests.post('http://{}/leader/{}'.format(next_vessel, LEADER_DECIDE),
@@ -545,13 +549,14 @@ try:
                             if res.status_code == OK:
                                 is_successful_request = True
                             else:
-                                # We raise an exception here because we want to have the same error handling
+                                # We raise an exception here because we want to have the same error handling because we
+                                # either return 200 or 500
                                 raise requests.RequestException
 
                         except requests.RequestException:
                             print "Can't contact server:", next_node
                             # Some type of connection error occurred while trying to connect to the server. We can check
-                            # for more specific types but at the moment, keep it like this
+                            # for more specific types but at the moment, keep it like this. Try to contact the next node
                             next_node += 1
 
         except Exception as e:
@@ -586,15 +591,18 @@ try:
 
         if action == BOARD_ADD:
             add_new_element_to_store(entry_sequence, entry)
+            # Propagate change
             begin_propagation("/propagate/{}".format(BOARD_ADD),
                               payload={"entry_sequence": entry_sequence, "entry": entry}, headers=JSON_DATA_HEADER)
             entry_sequence += 1
         elif action == BOARD_MODIFY:
             modify_element_in_store(requested_entry_sequence, entry)
+            # Propagate change
             begin_propagation("/propagate/{}".format(BOARD_MODIFY),
                               payload={"entry_sequence": requested_entry_sequence, "entry": entry}, headers=JSON_DATA_HEADER)
         else:
             delete_element_from_store(requested_entry_sequence)
+            # Propagate change
             begin_propagation("/propagate/{}".format(BOARD_DELETE), payload={"entry_sequence": requested_entry_sequence},
                               headers=JSON_DATA_HEADER)
 
@@ -618,7 +626,10 @@ try:
             vessel_list[i] = '10.1.0.{}'.format(str(i))
 
         try:
+            # We have a set server that imitates the leader election when we start the servers for the first time
             if node_id == START_NODE:
+                # We start a new thread since we want to the main thread to be able to listen for requests so we know
+                # when we have gone a full lap in the election process
                 thread = Thread(target=initiate_leader_decision)
                 thread.daemon = True
                 thread.start()

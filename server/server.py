@@ -1,6 +1,6 @@
 # coding=utf-8
 # ------------------------------------------------------------------------------------------------------
-# TDA596 - Lab 1
+# TDA596 - Lab 3
 # server/server.py
 # Input: Node_ID total_number_of_ID
 # Student: Anton Solback
@@ -11,14 +11,22 @@ import time
 import json
 import argparse
 import operator
+from datetime import datetime
 from threading import Thread
 
 from bottle import Bottle, run, request, template, response
 import requests
 
-BOARD_ADD = 'Add'
-BOARD_DELETE = 'Delete'
-BOARD_MODIFY = 'Modify'
+BOARD_ADD = 'add'
+BOARD_DELETE = 'delete'
+BOARD_MODIFY = 'modify'
+
+TIMESTAMP_KEY = 'timestamp'
+ENTRY_KEY = 'entry'
+
+TIMESTAMP_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
+
+JSON_DATA_HEADER = {'content-type':'application/json'}
 
 OK = 200
 INTERNAL_SERVER_ERROR = 500
@@ -28,30 +36,97 @@ try:
     app = Bottle()
 
     # Dictionary to represent the board
+    """
+    board: {
+        entry_sequence: {
+            timestamp: datetime.datetime
+            entry: string
+        }
+    }
+    """
+
     board = {}
     # Each entry gets a sequence number
-    entry_number = 1
+    entry_sequence = -1
 
     # ------------------------------------------------------------------------------------------------------
     # BOARD FUNCTIONS
     # Should nopt be given to the student
     # ------------------------------------------------------------------------------------------------------
-    def add_new_element_to_store(entry_sequence, element, is_propagated_call=False):
-        global board, node_id, entry_number
+    def add_new_element_to_store(entry_data, is_propagated_call=False):
+        global board, node_id, entry_sequence
         success = False
-        try:
-            # If the sequence numbers are not synced between servers we need to make sure that we don't override an
-            # entry. This will however, lead to that the boards between servers are not the same,
-            # we don't need to worry about propagated calls in this solution
-            while board.get(entry_sequence) is not None:
-                entry_sequence += 1
+        found_correct_placement = False
 
-            board[entry_sequence] = element
-            # Sync the global variable where we added the latest entry so we know where to add the next entry and
-            # increment it after this method
-            entry_number = entry_sequence
+        entry_sequence += 1
+        try:
+            # Convert received timestamp and convert it so that we can compare it
+            received_timestamp = datetime.strptime(entry_data[TIMESTAMP_KEY], TIMESTAMP_FORMAT)
+            received_entry = entry_data[ENTRY_KEY]
+
+            if is_propagated_call:
+                new_board = {}
+
+                # Find position where we want to add entry
+                for indexCounter, (timestamp, entry) in enumerate(board.values()):
+                    timestamp = board[indexCounter][timestamp]
+                    entry = board[indexCounter][entry]
+
+                    if found_correct_placement:
+                        new_board[indexCounter+1] = {}
+                        new_board[indexCounter+1].update({
+                            TIMESTAMP_KEY: timestamp,
+                            ENTRY_KEY: entry
+                        })
+                        continue
+
+                    new_board[indexCounter] = {}
+
+                    if timestamp < received_timestamp:
+                        new_board[indexCounter].update({
+                            TIMESTAMP_KEY: timestamp,
+                            ENTRY_KEY: entry
+                        })
+                    elif timestamp > received_timestamp:
+                        new_board[indexCounter].update({
+                            TIMESTAMP_KEY: received_timestamp,
+                            ENTRY_KEY: received_entry
+                        })
+
+                        new_board[indexCounter + 1] = {}
+                        new_board[indexCounter + 1].update({
+                            TIMESTAMP_KEY: timestamp,
+                            ENTRY_KEY: entry
+                        })
+
+                        # We have found the correct placement. Now we need to push back all resuming entries one step
+                        found_correct_placement = True
+                    else:
+                        pass
+
+                # The entry should be added to the back of the board
+                if found_correct_placement is False:
+                    new_board[entry_sequence] = {}
+
+                    new_board[entry_sequence].update({
+                        TIMESTAMP_KEY: received_timestamp,
+                        ENTRY_KEY: received_entry
+                    })
+
+                board = new_board
+            else:
+                # When we add to our own board we just add it to the current value of the the entry_sequence counter.
+                # When we get a propagated call we will have to decide the correct order of messages
+                board[entry_sequence] = {}
+
+                board[entry_sequence].update({
+                    TIMESTAMP_KEY: received_timestamp,
+                    ENTRY_KEY: received_entry
+                })
+
             success = True
         except Exception as e:
+            print "Exception occurred at add"
             print e
         return success
 
@@ -59,10 +134,15 @@ try:
         global board, node_id
         success = False
         try:
-            # Replace existing entry with modified one
-            board[entry_sequence] = modified_element
+
+            if is_propagated_call:
+                pass
+            else:
+                board[entry_sequence][ENTRY_KEY] = modified_element
+
             success = True
         except Exception as e:
+            print "Exception occurred at modify."
             print e
         return success
 
@@ -71,9 +151,13 @@ try:
         success = False
         try:
             # Remove item from board
-            del board[entry_sequence]
+            if is_propagated_call:
+                pass
+            else:
+                del board[entry_sequence]
             success = True
         except Exception as e:
+            print "Exception occurred at delete."
             print e
         return success
 
@@ -81,30 +165,35 @@ try:
     # DISTRIBUTED COMMUNICATIONS FUNCTIONS
     # should be given to the students?
     # ------------------------------------------------------------------------------------------------------
-    def contact_vessel(vessel_ip, path, payload=None, req='POST'):
+    def contact_vessel(vessel_ip, path, payload, headers, req='POST'):
         # Try to contact another server (vessel) through a POST or GET, once
         success = False
         try:
             if 'POST' in req:
-                res = requests.post('http://{}{}'.format(vessel_ip, path), data=payload)
-            elif 'GET' in req:
-                res = requests.get('http://{}{}'.format(vessel_ip, path))
+                data_type = headers.get("content-type")
+                if data_type == "application/json":
+                    res = requests.post('http://{}{}'.format(vessel_ip, path), headers=headers, json=payload)
+                else:
+                    res = requests.post('http://{}{}'.format(vessel_ip, path), data=payload)
             else:
-                print 'Non implemented feature!'
-            # result is in res.text or res.json()
-            print(res.text)
+                res = requests.get('http://{}{}'.format(vessel_ip, path))
+
             if res.status_code == 200:
                 success = True
+        # Vessel is down, do nothing, just pass to return False
+        except requests.RequestException:
+            pass
         except Exception as e:
+            print "Exception occurred at contact vessels"
             print e
+
         return success
 
-    def propagate_to_vessels(path, payload = None, req = 'POST'):
+    def propagate_to_vessels(path, payload=None, headers=None, req='POST'):
         global vessel_list, node_id
-
         for vessel_id, vessel_ip in vessel_list.items():
-            if int(vessel_id) != node_id: # don't propagate to yourself
-                success = contact_vessel(vessel_ip, path, payload, req)
+            if vessel_id != node_id:  # don't propagate to yourself
+                success = contact_vessel(vessel_ip, path, payload, headers, req=req)
                 if not success:
                     print "\n\nCould not contact vessel {}\n\n".format(vessel_id)
 
@@ -117,14 +206,22 @@ try:
     @app.route('/')
     def index():
         global board, node_id
-        # Sort dictionary on the entry_number in the dictionary
-        return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)), members_name_string='Anton Solback')
+        try:
+            # Sort dictionary on the entry_number in the dictionary
+            return template('server/index.tpl', board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)), members_name_string='Anton Solback')
+        except Exception as e:
+            print "Exception occurred at /."
+            print e
 
     @app.get('/board')
     def get_board():
         global board, node_id
-        # Sort dictionary on the entry_number in the dictionary
-        return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)))
+        try:
+            # Sort dictionary on the entry_number in the dictionary
+            return template('server/boardcontents_template.tpl',board_title='Vessel {}'.format(node_id), board_dict=sorted(board.items(), key=operator.itemgetter(0)))
+        except Exception as e:
+            print "Exception occurred at /board (get)."
+            print e
     # ------------------------------------------------------------------------------------------------------
     @app.post('/board')
     def client_add_received():
@@ -132,19 +229,27 @@ try:
         Adds a new element to the board
         Called directly when a user is doing a POST request on /board
         '''
-        global board, node_id, entry_number
+        global board, node_id, entry_sequence
         try:
             entry = request.forms.get('entry')
 
-            # Check if we successfully added the item to the board
-            if add_new_element_to_store(entry_number, entry):
-                # If we added it to our own board we need to tell others about it
-                _begin_propagation(BOARD_ADD, entry_number, entry)
-                # Increment sequence number next time we want to add something
-                entry_number += 1
-                # We successfully added an item, change response code
+            # Entry timestamp
+            timestamp = datetime.now()
+
+            # There is no reason why it wouldn't add the entry to the dictionary
+            entry_data = {
+                TIMESTAMP_KEY: timestamp.strftime(TIMESTAMP_FORMAT),
+                ENTRY_KEY: entry
+            }
+
+            add_new_element_to_store(entry_data)
+            # If we added it to our own board we need to tell others about it
+            begin_propagation("/propagate/{}".format(BOARD_ADD), entry_data, JSON_DATA_HEADER)
+            # Increment sequence number next time we want to add something
+            # We successfully added an item, change response code
 
         except Exception as e:
+            print "Exception occurred at /board (post)."
             print e
             response.status = INTERNAL_SERVER_ERROR
 
@@ -158,56 +263,59 @@ try:
             # Modify
             if action_to_perform == "0":
                 # If modification was successful, send it to others
-                if modify_element_in_store(element_id, entry):
-                    # Start new thread to propagate
-                    _begin_propagation(BOARD_MODIFY, element_id, entry)
+                modify_element_in_store(element_id, entry)
+                # Start new thread to propagate
+                #_begin_propagation(BOARD_MODIFY, element_id, entry)
             # Delete
             else:
                 # If deletion was successful, send it to others
                 if delete_element_from_store(element_id):
                     # Start new thread to propagate
-                    _begin_propagation(BOARD_DELETE, element_id)
+                    #_begin_propagation(BOARD_DELETE, element_id)
+                    pass
 
         except Exception as e:
+            print "Exception occurred at /board/elementid."
             print e
             response.status = INTERNAL_SERVER_ERROR
 
-    @app.post('/propagate/<action>/<element_id:int>')
-    def propagation_received(action, element_id):
-        global entry_number
+    @app.post('/propagate/<action>')
+    def propagation_received(action):
+        global entry_sequence
 
         try:
-            entry = request.body.getvalue()
+            entry = request.json
 
             # Someone has added something to the board
             if action == BOARD_ADD:
-                # Since we only send a propagation when the operation was successful we assume that we will be able to
-                # add it
-                add_new_element_to_store(element_id, entry, True)
-                entry_number += 1
+                add_new_element_to_store(entry, True)
 
             elif action == BOARD_DELETE:
-                # Since we only send a propagation when the operation was successful we assume that we will be able to
-                # modify it
-                delete_element_from_store(element_id, True)
+                delete_element_from_store(entry, True)
 
             else:
-                # Since we only send a propagation when the operation was successful we assume that we will be able to
-                # modify it
-                modify_element_in_store(element_id, request.body.getvalue(), True)
+                modify_element_in_store(entry, request.body.getvalue(), True)
 
         except Exception as e:
+            print "Exception occurred at /propagate."
             print e
             response.status = INTERNAL_SERVER_ERROR
 
-    def _begin_propagation(action, entry_number, entry=None):
+
+    def begin_propagation(url, payload=None, headers=None):
         """
-        Since there are muliple places where we want to start a new
-        thread, just extract that functionality here to avoid duplication
+        Since we use propagate_to_vessels at many places, this method avoid some code duplication because of the thread logic
+        :param url: The url to call
+        :param payload: What data to send
+        :param headers: Extra header information, such as Content-type
         """
-        thread = Thread(target=propagate_to_vessels, args=("/propagate/{}/{}".format(action, entry_number), entry))
-        thread.daemon = True
-        thread.start()
+        try:
+            thread = Thread(target=propagate_to_vessels, args=(url, payload, headers))
+            thread.daemon = True
+            thread.start()
+        except Exception as e:
+            print "Exception occurred at /begin_propagation."
+            print e
 
     # ------------------------------------------------------------------------------------------------------
     # EXECUTION
@@ -227,10 +335,10 @@ try:
         # We need to write the other vessels IP, based on the knowledge of their number
 
         for i in range(1, args.nbv+1):
-            vessel_list[str(i)] = '10.1.0.{}'.format(str(i))
+            vessel_list[i] = '10.1.0.{}'.format(str(i))
 
         try:
-            run(app, host=vessel_list[str(node_id)], port=port)
+            run(app, host=vessel_list[node_id], port=port)
         except Exception as e:
             print e
     # ------------------------------------------------------------------------------------------------------

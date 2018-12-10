@@ -20,12 +20,9 @@ BOARD_ADD = 'add'
 BOARD_DELETE = 'delete'
 BOARD_MODIFY = 'modify'
 
-ENTRY_ACTIVE = 'active'
-ENTRY_DELETED = 'deleted'
-
 ENTRY_KEY = 'entry'
 ACTION_KEY = 'action'
-STATUS_KEY = 'status'
+RETRY_KEY = 'retries'
 ID_KEY = 'id'
 NODE_ID_KEY = 'node_id'
 CLOCK_KEY = 'logical_clock'
@@ -57,8 +54,6 @@ try:
 
     clock = 0
 
-    # Initialize an array with 30 entries, doesn't matter what the values are
-    recent_deletes = [str(i) for i in range(0,30)]
     deletes_indicator = 0
 
     unhandled_requests = []
@@ -83,6 +78,13 @@ try:
         except Exception:
             print "Exception occurred at /begin_propagation."
             traceback.print_exc()
+
+    def get_next_index():
+        """
+        So that I can get the indices
+        """
+        for i in sorted(board.keys()):
+            yield i
     # ------------------------------------------------------------------------------------------------------
 
     # ------------------------------------------------------------------------------------------------------
@@ -96,73 +98,72 @@ try:
         :param is_propagated_call: if this action was sent from another server
         """
         global board, entry_sequence, remote_updates, local_updates
+
+        # Store the data that we receive for quick access
         received_clock = int(entry_data[CLOCK_KEY])
         received_node_id = int(entry_data[NODE_ID_KEY])
 
-        found_correct_placement = False
-
         received_entry = entry_data
-        received_entry[STATUS_KEY] = ENTRY_ACTIVE
+
+        # Define a generator that will help us place the index at the correct position
+        generator = get_next_index()
+
+        # This will reflect at which index the new entry should be placed at. If the new item should be placed at the
+        # end of the board then this value will remain None
+        index = None
+        # A help variable that holds an entry
+        temp_entry = None
 
         if is_propagated_call:
-            # Create new board
-            new_board = {}
-
-            # Find position where we want to add entry
+            # Loop and look for the correct position
             for i, entry in board.items():
+                if received_clock < entry[CLOCK_KEY]:
+                    # Save the position where we have added the new item
+                    index = i
+                    # Store the entry that we are overwriting
+                    temp_entry = board[i]
+                    # Add the new entry at the current position
+                    board[i] = received_entry
+                    # Break out of the loop
+                    break
+                elif received_clock == entry[CLOCK_KEY]:
+                    # Favour higher node ids
+                    if received_node_id > entry[NODE_ID_KEY]:
+                        index = i
+                        temp_entry = board[i]
+                        board[i] = received_entry
+                        # Break out of the loop
+                        break
 
-                # If we want to add an item in between an entry then we need to push back the remaining items in the
-                # board. In a real-worl scenario you would obviously use a database instead
-                if found_correct_placement:
-                    new_board[i+1] = {}
-                    new_board[i+1].update(entry)
-                    # We just need to push back the remaining items
-                    continue
-
-                # Create new entry at position i
-                new_board[i] = {}
-
-                if entry[CLOCK_KEY] < received_clock:
-                    # If the current cloch has a smaller value than the one received we just add the current item to
-                    # the same place that it previously had
-                    new_board[i].update(entry)
-                elif received_clock < entry[CLOCK_KEY]:
-                    # Push back the entry at the current index by one and insert the received entry at the current index
-                    new_board[i].update(received_entry)
-
-                    new_board[i+1] = {}
-                    new_board[i+1].update(entry)
-
-                    # Indicate that we have inserted the new item
-                    found_correct_placement = True
-                else:
-                    # If the current entry's clock is equal to the one received. In this case we need to look at node id
-                    # to determine the correct placement. We favour higher ID's
-                    if entry[NODE_ID_KEY] > received_node_id:
-                        new_board[i].update(entry)
-                        new_board[i+1] = {}
-                        new_board[i+1].update(received_entry)
-                    else:
-                        new_board[i].update(received_entry)
-
-                        new_board[i+1] = {}
-                        new_board[i+1].update(entry)
-
-                    # We have found the correct placement. Now we need to push back all resuming entries one step
-                    found_correct_placement = True
-
-            # See if we found the correct placement
-            if found_correct_placement is False:
-                # If this is false then we should add the item to the end of the board. Therefore, we can use the
-                # the entry_sequence or placement
-                new_board[entry_sequence] = {}
-                new_board[entry_sequence].update(received_entry)
-
-            # Set the previous board to the new one
-            board = new_board
+            not_done = True
+            # If index is None then we add the item to the back of the board
+            if index is not None:
+                # Loop unti we have gone through all items in the board
+                while not_done:
+                    try:
+                        # Since we add items to a dictionary we can't just use index+1 to push down every entry 1
+                        # position. Consider the following, if we add 3 items to the board and then we delete item 2,
+                        # then there will be no board[2] so if we add something at position 1 then the previous entry at
+                        # position 1 should now be at position 3 etc.
+                        next_index = generator.next()
+                        if next_index > index:
+                            # Shuffle entries around
+                            temp_entry_2 = board[next_index]
+                            board[next_index] = temp_entry
+                            temp_entry = temp_entry_2
+                    # If there are no more keys in the board then we should add the current temp_entry at the bottom of
+                    # the board with entry sequence as index
+                    except StopIteration:
+                        not_done = False
+                        board[entry_sequence] = {}
+                        board[entry_sequence] = temp_entry
+            else:
+                # If the item should be placed at the back of the board
+                board[entry_sequence] = {}
+                board[entry_sequence].update(received_entry)
         else:
-            # When we add to our own board we just add it to the current value of the the entry_sequence counter.
-            # We don't need to check order since that will be done when a call is propagated to us
+            # If the call isn't propagated we just add the item to the board and when a call is propagated we order the
+            # messages correctly
             board[entry_sequence] = {}
             board[entry_sequence].update(received_entry)
 
@@ -186,6 +187,12 @@ try:
         found_entry_to_modify = False
 
         if is_propagated_call or retry:
+            entry_info = {
+                UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
+                ENTRY_KEY: received_entry,
+                ACTION_KEY: BOARD_MODIFY,
+                RETRY_KEY: 1
+            }
             # If no messages to add any item to the board then we can't do anything. Add it to the list of unhandled
             # requests
             if len(board) > 0:
@@ -198,18 +205,18 @@ try:
 
                 if not found_entry_to_modify:
                     # If we didn't find the entry then we add it to unhandled requests.
-                    unhandled_requests.append({
-                        ENTRY_KEY: received_entry,
-                        UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
-                        ACTION_KEY: BOARD_MODIFY
-                    })
+                    if retry:
+                        entry_info[RETRY_KEY] = entry_data[RETRY_KEY]+1
+                        unhandled_requests.append(entry_info)
+                    else:
+                        unhandled_requests.append(entry_info)
             else:
                 # Board was empty
-                unhandled_requests.append({
-                    ENTRY_KEY: received_entry,
-                    UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
-                    ACTION_KEY: BOARD_MODIFY
-                })
+                if retry:
+                    entry_info[RETRY_KEY] = entry_data[RETRY_KEY] + 1
+                    unhandled_requests.append(entry_info)
+                else:
+                    unhandled_requests.append(entry_info)
         else:
             # We deleted an item that was on our own board. We can only call this method locally if that item was on the
             # board at that specific moment. Therefore we don't have to check if the board was empty etc
@@ -219,7 +226,21 @@ try:
 
     def delete_element_from_store(entry_data, is_propagated_call = False, retry=False):
         """
-        "Removes" an item from the board by changing that entries status to be deleted
+        "Removes" an item from the board
+        A limitation with this solution is the following scenario: 2 servers are running (for simplicity) and they have
+        2 items on their board each. Now, I send a message to add an item to each board and delete the second entry. On
+        server 1 the add message arrives first and it turns out that it should be placed before entry 2 and thus entry 2
+        will after the addition of this new item be att position 3, then the delete comes and removes the item at
+        position 3. On server 2, the delete message arrives first and deletes the item at index 2, and when the new item
+        arrives we add it to position 3. This scenario will cause it to be a difference in the sequence numbers. The
+        order will still be the same among messages. However, due to the fact that the sequence number reflects how the
+        messages arrived to this board there will sometimes be a small difference due to the fact that we can't look in
+        the future and see that we should hold with a certain request. This won't be solved if we look at the recent
+        updates to the board either and we can't trust on position in the board at the time of delete either for obvious
+        reasons. A way that this can be solved is that when something is added we create a new board and normalize the
+        positions but this doesn't preserve the original index at which we added the entry. So, this solution orders
+        the messages in the same order across servers but since the different servers get messages in different order,
+        therefore the entry sequence number might be different for the same message on another server.
         :param entry_data: information about the entry
         :param is_propagated_call: if this call was sent to us
         :param retry: if we retry to perform this action
@@ -231,41 +252,58 @@ try:
         found_entry_to_delete = False
 
         if is_propagated_call or retry:
+            entry_info = {
+                UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
+                ACTION_KEY: BOARD_DELETE,
+                RETRY_KEY: 1
+            }
             # If no messages to add any item to the board then we can't do anything. Add it to the list of unhandled
             # requests
             if len(board) > 0:
                 for i, entry in board.items():
                     # Find correct entry
                     if entry[UNIQUE_IDENTIFIER_KEY] == received_unique_identifier:
-                        # Change its status
-                        entry[STATUS_KEY] = ENTRY_DELETED
+                        # Delete
+                        del board[i]
                         found_entry_to_delete = True
+                        break
 
                 if not found_entry_to_delete:
                     # If we didn't find the entry then we add it to unhandled requests.
-                    unhandled_requests.append({
-                        UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
-                        ACTION_KEY: BOARD_DELETE
-                    })
+                    if retry:
+                        entry_info[RETRY_KEY] = entry_data[RETRY_KEY]+1
+                        unhandled_requests.append(entry_info)
+                    else:
+                        unhandled_requests.append(entry_info)
             else:
                 # Board was empty
-                unhandled_requests.append({
-                    UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
-                    ACTION_KEY: BOARD_DELETE
-                })
+                if retry:
+                    entry_info[RETRY_KEY] = entry_data[RETRY_KEY] + 1
+                    unhandled_requests.append(entry_info)
+                else:
+                    unhandled_requests.append(entry_info)
         else:
             # We deleted an item that was on our own board. We can only call this method locally if that item was on the
             # board at that specific moment. Therefore we don't have to check if the board was empty etc
             for i, entry in board.items():
                 if entry[UNIQUE_IDENTIFIER_KEY] == received_unique_identifier:
-                    entry[STATUS_KEY] = ENTRY_DELETED
+                    # Delete
+                    del board[i]
+                    break
 
     # ------------------------------------------------------------------------------------------------------
     # DISTRIBUTED COMMUNICATIONS FUNCTIONS
     # should be given to the students?
     # ------------------------------------------------------------------------------------------------------
     def contact_vessel(vessel_ip, path, payload, headers, req='POST'):
-        # Try to contact another server (vessel) through a POST or GET, once
+        """
+        Try to contact another server (vessel) through a POST or GET, once
+        :param vessel_ip: target ip
+        :param path: target path
+        :param payload: data to send
+        :param headers: custom headers
+        :param req: type of request
+        """
         success = False
         try:
             if 'POST' in req:
@@ -290,6 +328,9 @@ try:
         return success
 
     def propagate_to_vessels(path, payload=None, headers=None, req='POST'):
+        """
+        Propagate to vessels
+        """
         global vessel_list, node_id
         for vessel_id, vessel_ip in vessel_list.items():
             if vessel_id != node_id:  # don't propagate to yourself
@@ -306,10 +347,18 @@ try:
         # Go through each unhandled entry and try to delete/modify
         for i, unhandled_entry in enumerate(unhandled_requests):
             if unhandled_entry[ACTION_KEY] == BOARD_MODIFY:
-                modify_element_in_store(unhandled_entry, retry=True)
+                # We have tried to modify this message 20 times, this means that the request to add the message to the
+                # board hasn't arrived and couldn't arrive. Therefore, remove it
+                if unhandled_entry[RETRY_KEY] < 20:
+                    modify_element_in_store(unhandled_entry, retry=True)
+                # Remove the request
                 del unhandled_requests[i]
-            if unhandled_entry[ACTION_KEY] == BOARD_DELETE:
-                delete_element_from_store(unhandled_entry, retry=True)
+            elif unhandled_entry[ACTION_KEY] == BOARD_DELETE:
+                # We have tried to delete this message 20 times, this means that the request to add the message to the
+                # board hasn't arrived and couldn't arrive. Therefore, remove it
+                if unhandled_entry[RETRY_KEY] < 20:
+                    delete_element_from_store(unhandled_entry, retry=True)
+                # Remove the request
                 del unhandled_requests[i]
 
 
@@ -322,6 +371,7 @@ try:
     def index():
         global board, node_id, remote_updates
         try:
+            # Try to handle requests when a new client requests the main page
             handle_unhandled_requests()
 
             # Sort dictionary on the entry_number in the dictionary
@@ -334,7 +384,7 @@ try:
     def get_board():
         global board, node_id, remote_updates
         try:
-            # If there were any deletes/modifies that we couln't handle at the time, see if we can process them now
+            # Continuously try to update the board if there are any unhandled requests
             handle_unhandled_requests()
 
             # Sort dictionary on the entry_number in the dictionary
@@ -351,7 +401,6 @@ try:
         global board, node_id, entry_sequence, clock
         try:
             # Get the text
-            print datetime.now()
             entry = request.forms.get('entry')
 
             # Increase the clock
@@ -364,7 +413,7 @@ try:
                 # Create a unique identifier instead, this makes it much simpler when looking for the correct item
                 # Optimally this should be hashed as well, but we are satisfied with this at the moment
                 UNIQUE_IDENTIFIER_KEY: str(clock)+entry+str(node_id)+datetime.now().strftime(TIMESTAMP_FORMAT),
-                NODE_ID_KEY: node_id # If two clock values are the same we use node_id to determine the placement
+                NODE_ID_KEY: node_id    # If two clock values are the same we use node_id to determine the placement
             }
 
             # Add the element, we don't catch exception in add_new_element_to_store so if the add wasn't successful,
@@ -434,7 +483,6 @@ try:
         global entry_sequence, clock
 
         try:
-            print datetime.now()
             entry = request.json
 
             # Update the clock value

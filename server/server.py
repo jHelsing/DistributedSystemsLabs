@@ -6,7 +6,6 @@
 # Student: Anton Solback
 # ------------------------------------------------------------------------------------------------------
 import time
-from itertools import tee
 import argparse
 import traceback
 import operator
@@ -16,6 +15,7 @@ from threading import Thread
 from bottle import Bottle, run, request, template, response
 import requests
 
+# ------------------CONSTANTS------------------#
 BOARD_ADD = 'add'
 BOARD_DELETE = 'delete'
 BOARD_MODIFY = 'modify'
@@ -35,28 +35,30 @@ JSON_DATA_HEADER = {'content-type':'application/json'}
 OK = 200
 BAD_REQUEST = 400
 INTERNAL_SERVER_ERROR = 500
+# ---------------------------------------------#
 
 # ------------------------------------------------------------------------------------------------------
 try:
     app = Bottle()
-    # Dictionary to represent the board
 
-    """
-    board: {
-        entry_sequence: {
-            timestamp: datetime.datetime
-            entry: string
-            unique_identifier: hash(timestamp + entry)
-        }
-    }
-    """
+    # A dictionary that represents the board
     board = {}
 
+    # Representation of the logical clocks
     clock = 0
 
-    deletes_indicator = 0
-
+    # A list that contains requests that couldn't be processed at the time they arrived. They will be tried to be
+    # handled at a later point. They will be tried to be acted upon 20 (or any arbitrary number that you can decide)
+    # before they are removed. This is so that the list continues to grow all the time
     unhandled_requests = []
+
+    # A list to keep track of the recent modify messages. If two modify messages are sent at the same time keep track
+    # of recent modifies for a specific message so that every server shows the same message. We want a constant size
+    # of this list so that we don't constantly keep growing it. Therefore, give it an initial size of 40 with numbers
+    recent_modifies = range(0,40)
+    # Since we want a constant size of the recent modified messages list, we can't keep appending items. Therefore, we
+    # need to know where to write next
+    placement_index = 0
 
     # Each entry gets a sequence number
     entry_sequence = 0
@@ -81,7 +83,9 @@ try:
 
     def get_next_index():
         """
-        So that I can get the indices
+        So that I can get the indices. If I previously had an item at index 3 I don't want to write another item to that
+        index and constantly keep growing the dictionary. That means that when i want to "push" down items in the board
+        I need to know what indices are present in the board
         """
         for i in sorted(board.keys()):
             yield i
@@ -89,7 +93,6 @@ try:
 
     # ------------------------------------------------------------------------------------------------------
     # BOARD FUNCTIONS
-    # Should nopt be given to the student
     # ------------------------------------------------------------------------------------------------------
     def add_new_element_to_store(entry_data, is_propagated_call=False):
         """
@@ -102,10 +105,9 @@ try:
         # Store the data that we receive for quick access
         received_clock = int(entry_data[CLOCK_KEY])
         received_node_id = int(entry_data[NODE_ID_KEY])
-
         received_entry = entry_data
 
-        # Define a generator that will help us place the index at the correct position
+        # Define a generator that will help us place the entry at the correct position
         generator = get_next_index()
 
         # This will reflect at which index the new entry should be placed at. If the new item should be placed at the
@@ -177,22 +179,52 @@ try:
         :param is_propagated_call: if this call was sent to us
         :param retry: if we retry to perform this action
         """
-        global board, node_id, remote_updates, local_updates, unhandled_requests
+        global board, node_id, unhandled_requests, recent_modifies, placement_index
 
         # Identifier of the entry that we want to modify
         received_unique_identifier = entry_data[UNIQUE_IDENTIFIER_KEY]
         # The new entry
         received_entry = entry_data[ENTRY_KEY]
+        # Clock value at the point of sending this message
+        received_clock = entry_data[CLOCK_KEY]
+        # Node id of sender
+        received_node_id = int(entry_data[NODE_ID_KEY])
+
+        # If there arrives two messages that tries to modify the same entry, we want the message that was sent last and
+        # not the one that arrives at this server the last
+        for modified_entry in recent_modifies:
+            # When we initialize the list we just put numbers there, so if an item is not a dict then we don't care
+            if type(modified_entry) is not dict:
+                continue
+            if modified_entry[UNIQUE_IDENTIFIER_KEY] == received_unique_identifier:
+                if received_clock < modified_entry[CLOCK_KEY]:
+                    return
+                elif received_clock == modified_entry[CLOCK_KEY]:
+                    if received_node_id < modified_entry[NODE_ID_KEY]:
+                        return
+
+        # To know at what index this message should be placed at
+        if placement_index >= len(recent_modifies):
+            placement_index = 0
 
         found_entry_to_modify = False
 
+        # Information about an entry that we require to know in order to take a decision
+        modified_entry_info = {
+            CLOCK_KEY: received_clock,
+            UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
+            NODE_ID_KEY: received_node_id
+        }
+
+        # If we can't modify the message for any reason, this is the data that we want about an entry
+        unhandled_entry_info = modified_entry_info
+        unhandled_entry_info.update({
+            ENTRY_KEY: received_entry,
+            ACTION_KEY: BOARD_MODIFY,
+            RETRY_KEY: 1
+        })
+
         if is_propagated_call or retry:
-            entry_info = {
-                UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
-                ENTRY_KEY: received_entry,
-                ACTION_KEY: BOARD_MODIFY,
-                RETRY_KEY: 1
-            }
             # If no messages to add any item to the board then we can't do anything. Add it to the list of unhandled
             # requests
             if len(board) > 0:
@@ -201,27 +233,32 @@ try:
                     if entry[UNIQUE_IDENTIFIER_KEY] == received_unique_identifier:
                         # Modify entry
                         entry[ENTRY_KEY] = received_entry
+                        # Indicate that this message was recently modified
+                        recent_modifies[placement_index] = modified_entry_info
+                        placement_index += 1
                         found_entry_to_modify = True
 
                 if not found_entry_to_modify:
                     # If we didn't find the entry then we add it to unhandled requests.
                     if retry:
-                        entry_info[RETRY_KEY] = entry_data[RETRY_KEY]+1
-                        unhandled_requests.append(entry_info)
+                        unhandled_entry_info[RETRY_KEY] = entry_data[RETRY_KEY]+1
+                        unhandled_requests.append(unhandled_entry_info)
                     else:
-                        unhandled_requests.append(entry_info)
+                        unhandled_requests.append(unhandled_entry_info)
             else:
                 # Board was empty
                 if retry:
-                    entry_info[RETRY_KEY] = entry_data[RETRY_KEY] + 1
-                    unhandled_requests.append(entry_info)
+                    unhandled_entry_info[RETRY_KEY] = entry_data[RETRY_KEY] + 1
+                    unhandled_requests.append(unhandled_entry_info)
                 else:
-                    unhandled_requests.append(entry_info)
+                    unhandled_requests.append(unhandled_entry_info)
         else:
-            # We deleted an item that was on our own board. We can only call this method locally if that item was on the
-            # board at that specific moment. Therefore we don't have to check if the board was empty etc
+            # We modified an item that was on our own board. We can only call this method locally if that item was on
+            # the board at that specific moment. Therefore we don't have to check if the board was empty etc
             for i, entry in board.items():
                 if entry[UNIQUE_IDENTIFIER_KEY] == received_unique_identifier:
+                    recent_modifies[placement_index] = modified_entry_info
+                    placement_index += 1
                     entry[ENTRY_KEY] = received_entry
 
     def delete_element_from_store(entry_data, is_propagated_call = False, retry=False):
@@ -251,12 +288,14 @@ try:
 
         found_entry_to_delete = False
 
+        # If we can't modify the message for any reason, this is the data that we want about an entry
+        entry_info = {
+            UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
+            ACTION_KEY: BOARD_DELETE,
+            RETRY_KEY: 1
+        }
+
         if is_propagated_call or retry:
-            entry_info = {
-                UNIQUE_IDENTIFIER_KEY: received_unique_identifier,
-                ACTION_KEY: BOARD_DELETE,
-                RETRY_KEY: 1
-            }
             # If no messages to add any item to the board then we can't do anything. Add it to the list of unhandled
             # requests
             if len(board) > 0:
@@ -410,8 +449,11 @@ try:
             entry_data = {
                 CLOCK_KEY: clock,
                 ENTRY_KEY: entry,
-                # Create a unique identifier instead, this makes it much simpler when looking for the correct item
-                # Optimally this should be hashed as well, but we are satisfied with this at the moment
+                # Create a unique identifier, I've added a timestamp value, but it doesn't matter if the clocks are not
+                # synced between servers since we have the node_id as a part of the message. Also include clock value
+                # that identifies this action. These things combined, and also the original entry, make it so that this
+                # combination will not appear again. Having a unique identifier makes it simpler when looking for the
+                # correct item. Optimally this should be hashed, but we are satisfied with this at the moment
                 UNIQUE_IDENTIFIER_KEY: str(clock)+entry+str(node_id)+datetime.now().strftime(TIMESTAMP_FORMAT),
                 NODE_ID_KEY: node_id    # If two clock values are the same we use node_id to determine the placement
             }
@@ -432,7 +474,7 @@ try:
         """
         Receives an request to either modify or delete an item
         """
-        global clock
+        global clock, node_id
         try:
             action_to_perform = request.forms.get('action')
             entry = request.forms.get("entry")
@@ -448,7 +490,8 @@ try:
                     entry_data = {
                         UNIQUE_IDENTIFIER_KEY: board[element_id][UNIQUE_IDENTIFIER_KEY],
                         ENTRY_KEY: entry,
-                        CLOCK_KEY: clock
+                        CLOCK_KEY: clock,
+                        NODE_ID_KEY: node_id
                     }
                     # I don't capture exceptions in modify_element_in_store so if there is an exception we return an
                     # INTERNAL_SERVER_ERROR
@@ -459,7 +502,8 @@ try:
                 elif action_to_perform == "1":
                     entry_data = {
                         UNIQUE_IDENTIFIER_KEY: board[element_id][UNIQUE_IDENTIFIER_KEY],
-                        CLOCK_KEY: clock
+                        CLOCK_KEY: clock,
+                        NODE_ID_KEY: node_id
                     }
                     # I don't capture exceptions in delete_element_in_store so if there is an exception we return an
                     # INTERNAL_SERVER_ERROR

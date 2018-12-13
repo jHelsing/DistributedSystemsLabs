@@ -383,8 +383,10 @@ try:
         """
         global unhandled_requests, board
 
+        unhandled_requests_temporary = unhandled_requests[:]
+
         # Go through each unhandled entry and try to delete/modify
-        for i, unhandled_entry in enumerate(unhandled_requests):
+        for i, unhandled_entry in enumerate(unhandled_requests_temporary):
             if unhandled_entry[ACTION_KEY] == BOARD_MODIFY:
                 # We have tried to modify this message 20 times, this means that the request to add the message to the
                 # board hasn't arrived and couldn't arrive. Therefore, remove it

@@ -11,6 +11,7 @@ import traceback
 import operator
 from datetime import datetime
 from threading import Thread
+from .byzantine_behaviour import *
 
 from bottle import Bottle, run, request, template, response
 import requests
@@ -19,6 +20,11 @@ import requests
 BOARD_ADD = 'add'
 BOARD_DELETE = 'delete'
 BOARD_MODIFY = 'modify'
+
+BYZANTINE_ATTACK = 'attack'
+BYZANTINE_WAIT = 'wait'
+BYZANTINE_BYZANTINE = 'byzantine'
+BYZANTINE_VOTE_KEY = 'vote'
 
 ENTRY_KEY = 'entry'
 ACTION_KEY = 'action'
@@ -550,6 +556,38 @@ try:
             print "Exception occurred at /propagate."
             traceback.print_exc()
             response.status = INTERNAL_SERVER_ERROR
+
+
+    # ------------------------------------------------------------------------------------------------------
+    # BYZANTINE STUFF
+    # ------------------------------------------------------------------------------------------------------
+    @app.post('/vote/<action>')
+    def node_voting(action):
+        try:
+            if action == BYZANTINE_BYZANTINE:
+                pass
+            else:
+                begin_propagation('/byzantineVoting/1', {BYZANTINE_VOTE_KEY: action}, JSON_DATA_HEADER)
+
+        except Exception:
+            print traceback.print_exc()
+
+    @app.get('/vote/result')
+    def get_vote_result():
+        try:
+            pass
+        except Exception:
+            print traceback.print_exc()
+
+    @app.post('/byzantineVoting/<round:int>')
+    def get_intended_action(round):
+        try:
+            if round == 1:
+                pass
+        except Exception:
+            print traceback.print_exc()
+
+    # ------------------------------------------------------------------------------------------------------
 
     # ------------------------------------------------------------------------------------------------------
     # EXECUTION
